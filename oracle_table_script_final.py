@@ -15,8 +15,11 @@ DEFAULT_SEARCH_DOMAIN = "docs.oracle.com/en/cloud/saas/"
 USER_AGENT = {"User-Agent": "Mozilla/5.0"}
 
 # *** ENTER YOUR CREDENTIALS HERE ***
-GOOGLE_API_KEY = "AIzaSyDSaym2PtbpWVQK3ax1ajf_NnQT0ajoWT0"  # Replace with your actual API key
-GOOGLE_CSE_ID = "045c4042f598646a4"  # Replace with your actual CSE ID
+#GOOGLE_API_KEY = "zzzzzzzzzzzzzzzzzzz"  # Replace with your actual API key
+#GOOGLE_CSE_ID = "zzzzzzzzzzzz"  # Replace with your actual CSE ID
+
+GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "YOUR_API_KEY_HERE")
+GOOGLE_CSE_ID = st.secrets.get("GOOGLE_CSE_ID", "YOUR_CSE_ID_HERE")
 
 # Counter file to track daily usage
 COUNTER_FILE = "api_usage_counter.json"
@@ -461,4 +464,5 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
             file_name=f"{st.session_state.table_name}_create.sql",
             mime="text/plain",
             key="download_sql"
+
         )
