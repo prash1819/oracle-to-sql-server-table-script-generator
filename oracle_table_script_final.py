@@ -39,6 +39,10 @@ if 'table_name' not in st.session_state:
     st.session_state.table_name = None
 if 'doc_url' not in st.session_state:
     st.session_state.doc_url = None
+if 'show_db_selection' not in st.session_state:
+    st.session_state.show_db_selection = False
+if 'selected_database' not in st.session_state:
+    st.session_state.selected_database = None
 
 
 # ---------- SQL Server Functions ----------
@@ -85,8 +89,51 @@ def execute_sql_script(sql_script, database_name=None):
         conn.close()
         
         return True, "Table created successfully!"
+    except pyodbc.Error as e:
+        error_message = str(e)
+        # Check if it's a table already exists error
+        if "already an object" in error_message.lower() or "already exists" in error_message.lower():
+            return False, "TABLE_EXISTS"
+        else:
+            return False, error_message
     except Exception as e:
         return False, str(e)
+
+
+def check_table_exists(table_name, database_name=None):
+    """Check if table already exists in SQL Server"""
+    try:
+        # Use specified database or default
+        db = database_name if database_name else SQL_DATABASE
+        
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SQL_SERVER};"
+            f"DATABASE={db};"
+            f"UID={SQL_USERNAME};"
+            f"PWD={SQL_PASSWORD}"
+        )
+        
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+        
+        # Check if table exists
+        check_query = f"""
+        SELECT COUNT(*) 
+        FROM INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_NAME = 'ST_FN_{table_name.upper()}'
+        """
+        
+        cursor.execute(check_query)
+        result = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        return result[0] > 0
+    except Exception as e:
+        st.warning(f"Could not check if table exists: {e}")
+        return False
 
 
 def get_databases():
@@ -556,35 +603,86 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
         )
 
     with col3:
-        # Database selection and create table button
-        if st.button("🗄️ Create Table in SQL Server"):
-            # Get list of databases
+        # Create table button with proper state management
+        if st.button("🗄️ Create Table in SQL Server", key="create_table_btn"):
+            st.session_state.show_db_selection = True
+    
+    # Show database selection outside of columns to prevent rerun issues
+    if st.session_state.show_db_selection:
+        st.write("---")
+        st.subheader("📊 Create Table in SQL Server")
+        
+        # Get list of databases
+        with st.spinner("Loading databases..."):
             databases = get_databases()
+        
+        if databases:
+            selected_db = st.selectbox(
+                "Select Database:",
+                options=databases,
+                key="database_selector"
+            )
             
-            if databases:
-                st.write("**Select Database:**")
-                selected_db = st.selectbox(
-                    "Choose database",
-                    options=databases,
-                    key="db_selector"
-                )
-                
-                if st.button("✅ Confirm and Create", key="confirm_create"):
-                    with st.spinner(f"Creating table in {selected_db}..."):
-                        success, message = execute_sql_script(st.session_state.sql_script, selected_db)
-                        
-                        if success:
-                            st.success(f"✅ {message}")
-                            st.info(f"Table ST_FN_{st.session_state.table_name} created in database: {selected_db}")
-                        else:
-                            st.error(f"❌ Failed to create table: {message}")
-            else:
-                st.warning("No user databases found. Creating in default database...")
-                with st.spinner("Creating table..."):
-                    success, message = execute_sql_script(st.session_state.sql_script)
+            col_create1, col_create2 = st.columns([1, 4])
+            
+            with col_create1:
+                if st.button("✅ Create Table", key="confirm_create_btn"):
+                    # First check if table already exists
+                    table_exists = check_table_exists(st.session_state.table_name, selected_db)
                     
-                    if success:
-                        st.success(f"✅ {message}")
-                        st.info(f"Table ST_FN_{st.session_state.table_name} created")
+                    if table_exists:
+                        st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **{selected_db}**!")
+                        st.warning("⚠️ Please search for another table or drop the existing table first.")
+                        st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
                     else:
-                        st.error(f"❌ Failed to create table: {message}")
+                        with st.spinner(f"Creating table in {selected_db}..."):
+                            success, message = execute_sql_script(st.session_state.sql_script, selected_db)
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                                st.info(f"Table **ST_FN_{st.session_state.table_name}** created in database: **{selected_db}**")
+                                st.session_state.show_db_selection = False
+                            elif message == "TABLE_EXISTS":
+                                st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **{selected_db}**!")
+                                st.warning("⚠️ Please search for another table or drop the existing table first.")
+                                st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
+                            else:
+                                st.error(f"❌ Failed to create table: {message}")
+            
+            with col_create2:
+                if st.button("❌ Cancel", key="cancel_btn"):
+                    st.session_state.show_db_selection = False
+                    st.rerun()
+        else:
+            st.warning("⚠️ No user databases found. Using default database 'master'...")
+            
+            col_create1, col_create2 = st.columns([1, 4])
+            
+            with col_create1:
+                if st.button("✅ Create Table", key="confirm_create_default_btn"):
+                    # First check if table already exists
+                    table_exists = check_table_exists(st.session_state.table_name, "master")
+                    
+                    if table_exists:
+                        st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **master**!")
+                        st.warning("⚠️ Please search for another table or drop the existing table first.")
+                        st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
+                    else:
+                        with st.spinner("Creating table in master database..."):
+                            success, message = execute_sql_script(st.session_state.sql_script, "master")
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                                st.info(f"Table **ST_FN_{st.session_state.table_name}** created in database: **master**")
+                                st.session_state.show_db_selection = False
+                            elif message == "TABLE_EXISTS":
+                                st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **master**!")
+                                st.warning("⚠️ Please search for another table or drop the existing table first.")
+                                st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
+                            else:
+                                st.error(f"❌ Failed to create table: {message}")
+            
+            with col_create2:
+                if st.button("❌ Cancel", key="cancel_default_btn"):
+                    st.session_state.show_db_selection = False
+                    st.rerun()
