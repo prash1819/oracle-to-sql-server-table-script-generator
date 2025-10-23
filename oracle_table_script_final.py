@@ -9,17 +9,21 @@ from googleapiclient.errors import HttpError
 import json
 from datetime import datetime
 import os
+import pyodbc
 
 # ---------- CONFIGURATION ----------
 DEFAULT_SEARCH_DOMAIN = "docs.oracle.com/en/cloud/saas/"
 USER_AGENT = {"User-Agent": "Mozilla/5.0"}
 
 # *** ENTER YOUR CREDENTIALS HERE ***
-#GOOGLE_API_KEY = "zzzzzzzzzzzzzzzzzzz"  # Replace with your actual API key
-#GOOGLE_CSE_ID = "zzzzzzzzzzzz"  # Replace with your actual CSE ID
-
 GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "YOUR_API_KEY_HERE")
 GOOGLE_CSE_ID = st.secrets.get("GOOGLE_CSE_ID", "YOUR_CSE_ID_HERE")
+
+# SQL Server Configuration - Using Streamlit secrets for security
+SQL_SERVER = st.secrets.get("SQL_SERVER", "43.231.235.199")
+SQL_USERNAME = st.secrets.get("SQL_USERNAME", "sa")
+SQL_PASSWORD = st.secrets.get("SQL_PASSWORD", "love")
+SQL_DATABASE = st.secrets.get("SQL_DATABASE", "master")  # Default database
 
 # Counter file to track daily usage
 COUNTER_FILE = "api_usage_counter.json"
@@ -35,6 +39,80 @@ if 'table_name' not in st.session_state:
     st.session_state.table_name = None
 if 'doc_url' not in st.session_state:
     st.session_state.doc_url = None
+
+
+# ---------- SQL Server Functions ----------
+
+def test_sql_connection():
+    """Test SQL Server connection"""
+    try:
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SQL_SERVER};"
+            f"DATABASE={SQL_DATABASE};"
+            f"UID={SQL_USERNAME};"
+            f"PWD={SQL_PASSWORD}"
+        )
+        conn = pyodbc.connect(conn_str, timeout=5)
+        conn.close()
+        return True, "Connection successful!"
+    except Exception as e:
+        return False, str(e)
+
+
+def execute_sql_script(sql_script, database_name=None):
+    """Execute SQL script on SQL Server"""
+    try:
+        # Use specified database or default
+        db = database_name if database_name else SQL_DATABASE
+        
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SQL_SERVER};"
+            f"DATABASE={db};"
+            f"UID={SQL_USERNAME};"
+            f"PWD={SQL_PASSWORD}"
+        )
+        
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+        
+        # Execute the SQL script
+        cursor.execute(sql_script)
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        
+        return True, "Table created successfully!"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_databases():
+    """Get list of databases from SQL Server"""
+    try:
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SQL_SERVER};"
+            f"DATABASE=master;"
+            f"UID={SQL_USERNAME};"
+            f"PWD={SQL_PASSWORD}"
+        )
+        
+        conn = pyodbc.connect(conn_str, timeout=5)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sys.databases WHERE name NOT IN ('master', 'tempdb', 'model', 'msdb') ORDER BY name")
+        databases = [row[0] for row in cursor.fetchall()]
+        
+        cursor.close()
+        conn.close()
+        
+        return databases
+    except Exception as e:
+        st.error(f"Error fetching databases: {e}")
+        return []
 
 
 # ---------- API Usage Tracking ----------
@@ -338,6 +416,17 @@ if not credentials_configured:
 else:
     st.success("✅ Google API credentials configured")
 
+# SQL Server Connection Status
+with st.expander("🔌 SQL Server Connection", expanded=False):
+    if st.button("Test SQL Server Connection"):
+        with st.spinner("Testing connection..."):
+            success, message = test_sql_connection()
+            if success:
+                st.success(f"✅ {message}")
+                st.info(f"Connected to: {SQL_SERVER}")
+            else:
+                st.error(f"❌ Connection failed: {message}")
+
 table_name_input = st.text_input("Enter Oracle Table Name (e.g. AP_INVOICES_ALL):").strip()
 
 use_google_api = st.toggle("Use Google Custom Search API (Free 100 queries/day)")
@@ -445,8 +534,8 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
     st.session_state.conv_df.to_excel(buf, index=False, engine='openpyxl')
     buf.seek(0)
 
-    # Download buttons side by side
-    col1, col2 = st.columns(2)
+    # Download buttons and Create Table button
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.download_button(
@@ -464,5 +553,38 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
             file_name=f"{st.session_state.table_name}_create.sql",
             mime="text/plain",
             key="download_sql"
-
         )
+
+    with col3:
+        # Database selection and create table button
+        if st.button("🗄️ Create Table in SQL Server"):
+            # Get list of databases
+            databases = get_databases()
+            
+            if databases:
+                st.write("**Select Database:**")
+                selected_db = st.selectbox(
+                    "Choose database",
+                    options=databases,
+                    key="db_selector"
+                )
+                
+                if st.button("✅ Confirm and Create", key="confirm_create"):
+                    with st.spinner(f"Creating table in {selected_db}..."):
+                        success, message = execute_sql_script(st.session_state.sql_script, selected_db)
+                        
+                        if success:
+                            st.success(f"✅ {message}")
+                            st.info(f"Table ST_FN_{st.session_state.table_name} created in database: {selected_db}")
+                        else:
+                            st.error(f"❌ Failed to create table: {message}")
+            else:
+                st.warning("No user databases found. Creating in default database...")
+                with st.spinner("Creating table..."):
+                    success, message = execute_sql_script(st.session_state.sql_script)
+                    
+                    if success:
+                        st.success(f"✅ {message}")
+                        st.info(f"Table ST_FN_{st.session_state.table_name} created")
+                    else:
+                        st.error(f"❌ Failed to create table: {message}")
