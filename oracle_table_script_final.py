@@ -15,6 +15,9 @@ import pyodbc
 DEFAULT_SEARCH_DOMAIN = "docs.oracle.com/en/cloud/saas/"
 USER_AGENT = {"User-Agent": "Mozilla/5.0"}
 
+# Default table prefix
+DEFAULT_TABLE_PREFIX = "ST_FN_"
+
 # *** ENTER YOUR CREDENTIALS HERE ***
 GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "YOUR_API_KEY_HERE")
 GOOGLE_CSE_ID = st.secrets.get("GOOGLE_CSE_ID", "YOUR_CSE_ID_HERE")
@@ -43,7 +46,9 @@ if 'show_db_selection' not in st.session_state:
     st.session_state.show_db_selection = False
 if 'selected_database' not in st.session_state:
     st.session_state.selected_database = None
-
+# Prefix persistence: default to DEFAULT_TABLE_PREFIX on first run
+if 'table_prefix' not in st.session_state:
+    st.session_state.table_prefix = DEFAULT_TABLE_PREFIX
 
 # ---------- SQL Server Functions ----------
 
@@ -100,11 +105,12 @@ def execute_sql_script(sql_script, database_name=None):
         return False, str(e)
 
 
-def check_table_exists(table_name, database_name=None):
+def check_table_exists(table_name, database_name=None, prefix=None):
     """Check if table already exists in SQL Server"""
     try:
         # Use specified database or default
         db = database_name if database_name else SQL_DATABASE
+        prefix_to_use = prefix if prefix is not None else st.session_state.get('table_prefix', DEFAULT_TABLE_PREFIX)
         
         conn_str = (
             f"DRIVER={{ODBC Driver 17 for SQL Server}};"
@@ -117,11 +123,11 @@ def check_table_exists(table_name, database_name=None):
         conn = pyodbc.connect(conn_str, timeout=10)
         cursor = conn.cursor()
         
-        # Check if table exists
+        # Check if table exists. Use upper-case to be consistent.
         check_query = f"""
         SELECT COUNT(*) 
         FROM INFORMATION_SCHEMA.TABLES 
-        WHERE TABLE_NAME = 'ST_FN_{table_name.upper()}'
+        WHERE TABLE_NAME = '{(prefix_to_use + table_name).upper()}'
         """
         
         cursor.execute(check_query)
@@ -433,15 +439,15 @@ def convert_datatypes(df):
     return result_df
 
 
-def generate_sql(table_name, df):
-    """Build CREATE TABLE SQL"""
+def generate_sql(table_name, df, prefix=None):
+    """Build CREATE TABLE SQL using provided prefix (or session prefix)"""
     if df.empty:
         return "-- No columns to generate"
 
-    lines = [f"CREATE TABLE ST_FN_{table_name.upper()} ("]
+    prefix_to_use = prefix if prefix is not None else st.session_state.get('table_prefix', DEFAULT_TABLE_PREFIX)
+    lines = [f"CREATE TABLE {prefix_to_use}{table_name.upper()} ("]
     for _, r in df.iterrows():
         lines.append(f"    {r['COLUMN_NAME']} {r['SQL_SERVER_TYPE']},")
-
     if len(lines) > 1:
         lines[-1] = lines[-1].rstrip(",")
     lines.append(");")
@@ -474,6 +480,17 @@ with st.expander("🔌 SQL Server Connection", expanded=False):
             else:
                 st.error(f"❌ Connection failed: {message}")
 
+# Prefix input area
+st.write("---")
+st.subheader("⚙️ Table Prefix (persistent during session)")
+# Show current prefix in a text input so user can change it. Use session_state to remember last-used.
+prefix_input = st.text_input("Enter table prefix (example: ST_FN_ or ST_OM_):", value=st.session_state.table_prefix, max_chars=20, key="prefix_input")
+
+# Validate prefix_input: ensure it ends with underscore for consistency
+if prefix_input and not prefix_input.endswith("_"):
+    st.info("Tip: it's common to end the prefix with an underscore (e.g., ST_FN_). You can omit it if you prefer.")
+# Note: we don't force an underscore; we just show helpful tip.
+
 table_name_input = st.text_input("Enter Oracle Table Name (e.g. AP_INVOICES_ALL):").strip()
 
 use_google_api = st.toggle("Use Google Custom Search API (Free 100 queries/day)")
@@ -495,12 +512,18 @@ if st.session_state.results_ready:
         st.session_state.sql_script = None
         st.session_state.table_name = None
         st.session_state.doc_url = None
+        # keep the prefix in session_state so it remains as default for the next search
         st.rerun()
 
 if st.button("Generate") and not st.session_state.results_ready:
     if not table_name_input:
         st.error("Please enter a table name.")
         st.stop()
+
+    # Update and persist prefix chosen by user BEFORE generation
+    chosen_prefix = prefix_input if prefix_input else st.session_state.table_prefix
+    # Save the chosen prefix in session_state so next searches use it
+    st.session_state.table_prefix = chosen_prefix
 
     with st.spinner("🔍 Searching Oracle documentation..."):
         url = None
@@ -559,7 +582,8 @@ if st.button("Generate") and not st.session_state.results_ready:
             st.error("❌ No valid columns were converted.")
             st.stop()
 
-        sql_script = generate_sql(table_name_input, conv)
+        # Generate SQL using chosen prefix
+        sql_script = generate_sql(table_name_input, conv, prefix=st.session_state.table_prefix)
 
         # Store in session state
         st.session_state.conv_df = conv
@@ -571,7 +595,8 @@ if st.button("Generate") and not st.session_state.results_ready:
 
 # Display results if they exist in session state
 if st.session_state.results_ready and st.session_state.conv_df is not None:
-    st.success(f"✅ Results for table: **{st.session_state.table_name}**")
+    prefix_display = st.session_state.get('table_prefix', DEFAULT_TABLE_PREFIX)
+    st.success(f"✅ Results for table: **{prefix_display}{st.session_state.table_name}**")
 
     if st.session_state.doc_url:
         st.info(f"📄 Source: {st.session_state.doc_url}")
@@ -616,6 +641,7 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
         with st.spinner("Loading databases..."):
             databases = get_databases()
         
+        prefix_in_use = st.session_state.get('table_prefix', DEFAULT_TABLE_PREFIX)
         if databases:
             selected_db = st.selectbox(
                 "Select Database:",
@@ -627,11 +653,11 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
             
             with col_create1:
                 if st.button("✅ Create Table", key="confirm_create_btn"):
-                    # First check if table already exists
-                    table_exists = check_table_exists(st.session_state.table_name, selected_db)
+                    # First check if table already exists (use prefix_in_use)
+                    table_exists = check_table_exists(st.session_state.table_name, selected_db, prefix=prefix_in_use)
                     
                     if table_exists:
-                        st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **{selected_db}**!")
+                        st.error(f"❌ Table **{prefix_in_use}{st.session_state.table_name}** already exists in database **{selected_db}**!")
                         st.warning("⚠️ Please search for another table or drop the existing table first.")
                         st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
                     else:
@@ -640,10 +666,10 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
                             
                             if success:
                                 st.success(f"✅ {message}")
-                                st.info(f"Table **ST_FN_{st.session_state.table_name}** created in database: **{selected_db}**")
+                                st.info(f"Table **{prefix_in_use}{st.session_state.table_name}** created in database: **{selected_db}**")
                                 st.session_state.show_db_selection = False
                             elif message == "TABLE_EXISTS":
-                                st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **{selected_db}**!")
+                                st.error(f"❌ Table **{prefix_in_use}{st.session_state.table_name}** already exists in database **{selected_db}**!")
                                 st.warning("⚠️ Please search for another table or drop the existing table first.")
                                 st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
                             else:
@@ -661,10 +687,10 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
             with col_create1:
                 if st.button("✅ Create Table", key="confirm_create_default_btn"):
                     # First check if table already exists
-                    table_exists = check_table_exists(st.session_state.table_name, "master")
+                    table_exists = check_table_exists(st.session_state.table_name, "master", prefix=prefix_in_use)
                     
                     if table_exists:
-                        st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **master**!")
+                        st.error(f"❌ Table **{prefix_in_use}{st.session_state.table_name}** already exists in database **master**!")
                         st.warning("⚠️ Please search for another table or drop the existing table first.")
                         st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
                     else:
@@ -673,10 +699,10 @@ if st.session_state.results_ready and st.session_state.conv_df is not None:
                             
                             if success:
                                 st.success(f"✅ {message}")
-                                st.info(f"Table **ST_FN_{st.session_state.table_name}** created in database: **master**")
+                                st.info(f"Table **{prefix_in_use}{st.session_state.table_name}** created in database: **master**")
                                 st.session_state.show_db_selection = False
                             elif message == "TABLE_EXISTS":
-                                st.error(f"❌ Table **ST_FN_{st.session_state.table_name}** already exists in database **master**!")
+                                st.error(f"❌ Table **{prefix_in_use}{st.session_state.table_name}** already exists in database **master**!")
                                 st.warning("⚠️ Please search for another table or drop the existing table first.")
                                 st.info("💡 Tip: Click '🔄 Start New Search' above to search for a different table.")
                             else:
